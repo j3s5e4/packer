@@ -170,14 +170,18 @@ def compile(config):
     PRE_PROCESS = config.argument_values["add_pre_process"]
     PRE_PROCESS_ARGS = config.argument_values["add_pre_process_args"]
     SET_CLIENT_UDP_PORT = config.argument_values["set_client_udp_port"]
+    SPEC_MODE = False
 
+    # --nyx_net with afl activates nyx_net mode without specs
+    # --nyx_net with spec uses the old nyx_net spec mode
     if config.argument_values["mode"] == "afl":
-        LEGACY_MODE = True
+        if NET_FUZZ_MODE:
+            LEGACY_MODE = False
+        else:
+            LEGACY_MODE = True
     elif config.argument_values["mode"] == "spec":
-        print(WARNING + WARNING_PREFIX + "The integrated nyxnet&afl++ mode is now \"nyxnet\"")
         LEGACY_MODE = False
-    elif config.argument_values["mode"] == "nyxnet":
-        LEGACY_MODE = False
+        SPEC_MODE = True # Use this to differentiate between spec and non-spec mode in preload
     else:
         raise Exception("Unkown mode: %s"%(config.argument_values["mode"]))
     
@@ -222,6 +226,8 @@ def compile(config):
         os.environ["NYX_SPEC_FOLDER"] = SPEC_FOLDER + "/build"
     if LEGACY_MODE:
         os.environ["LEGACY_MODE"] = "ON"
+    if SPEC_MODE:
+        os.environ["SPEC_MODE"] = "-DSPEC_MODE"
     if NET_FUZZ_MODE:
         os.environ["NET_FUZZ"] = "ON"
     if UDP_MODE:
@@ -307,24 +313,6 @@ def compile(config):
         asan_executable = is_asan_executable(config.argument_values["binary_file"])
 
     download_script += dependencies
-
-    if not LEGACY_MODE:
-        protobuf_lib_file = "/usr/local/lib/libprotobuf.so.32"
-        copyfile(protobuf_lib_file, "%s/%s"%(config.argument_values["output_dir"], os.path.basename(protobuf_lib_file)))
-        cpp_lib_file = "/usr/lib/x86_64-linux-gnu/libstdc++.so.6"
-        copyfile(cpp_lib_file, "%s/%s"%(config.argument_values["output_dir"], os.path.basename(cpp_lib_file)))
-        m_lib_file = "/lib/x86_64-linux-gnu/libm.so.6"
-        copyfile(m_lib_file, "%s/%s"%(config.argument_values["output_dir"], os.path.basename(m_lib_file)))
-        gcc_lib_file = "/lib/x86_64-linux-gnu/libgcc_s.so.1"
-        copyfile(gcc_lib_file, "%s/%s"%(config.argument_values["output_dir"], os.path.basename(gcc_lib_file)))
-        z_lib_file = "/lib/x86_64-linux-gnu/libz.so.1"
-        copyfile(z_lib_file, "%s/%s"%(config.argument_values["output_dir"], os.path.basename(z_lib_file)))
-
-        download_script += "./hget %s %s\n"%(os.path.basename(protobuf_lib_file), os.path.basename(protobuf_lib_file))
-        download_script += "./hget %s %s\n"%(os.path.basename(cpp_lib_file), os.path.basename(cpp_lib_file))
-        download_script += "./hget %s %s\n"%(os.path.basename(m_lib_file), os.path.basename(m_lib_file))
-        download_script += "./hget %s %s\n"%(os.path.basename(gcc_lib_file), os.path.basename(gcc_lib_file))
-        download_script += "./hget %s %s\n"%(os.path.basename(z_lib_file), os.path.basename(z_lib_file))
 
     download_script += "echo \"Let's get our target executable...\" | ./hcat\n"
     copyfile(config.argument_values["binary_file"], "%s/%s"%(config.argument_values["output_dir"], os.path.basename(config.argument_values["binary_file"])))
@@ -426,9 +414,7 @@ def compile(config):
         download_script += "cat stdout.txt | ./hcat\n"
         download_script += "cat stderr.txt | ./hcat\n"
     else:
-        #download_script += " > /dev/null 2> /dev/null\n"
-        download_script += "2>&1 | ./hcat\n"
-
+        download_script += " > /dev/null 2> /dev/null\n"
  
     download_script += "dmesg | grep segfault | ./hcat\n"
     download_script += "./habort \"Target has terminated without initializing the fuzzing agent ...\"\n"
@@ -443,7 +429,7 @@ def compile(config):
     f.write(download_script.replace("./hget hcat", "./hget hcat_no_pt").replace("./hget habort", "./hget habort_no_pt").replace("./hget ld_preload_fuzz.so", "./hget ld_preload_fuzz_no_pt.so"))
     f.close()
 
-    print(OKGREEN + INFO_PREFIX + "NYX share-dir is ready -> %s"%(config.argument_values["output_dir"]))
+    print(OKGREEN + INFO_PREFIX + "NYX share-dir is ready -> %s"%(config.argument_values["output_dir"]) + ENDC)
 
     return
 

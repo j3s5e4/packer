@@ -24,8 +24,6 @@
 #include "misc/crash_handler.h"
 #include "misc/harness_state.h"
 
-#include "afl_input.h"
-
 //#define HYPERCALL_KAFL_RELEASE_DEBUG
 
 #define likely(x)       __builtin_expect((x),1)
@@ -56,8 +54,32 @@ bool payload_mode = false;
 #include "netfuzz/syscalls.h"
 //#endif
 
+#ifdef SPEC_MODE
 
+/* Spec mode uses the interpreter */
 #include "interpreter.h"
+
+#else
+
+extern void __assert(const char *func, const char *file, int line, const char *failedexpr);
+#define INTERPRETER_ASSERT(x) do { if (x){}else{ __assert(__func__, __FILE__, __LINE__, #x);} } while (0)
+#define ASSERT(x) INTERPRETER_ASSERT(x)
+
+/* Nyx-net mode uses the vm data structure */
+#ifndef LEGACY_MODE
+typedef struct {
+	uint16_t* ops;
+	size_t* ops_len;
+	size_t ops_i;
+
+	uint8_t* data;
+	uint32_t* data_len;
+	size_t data_i;
+	uint32_t* instruction_counter;
+} interpreter_t;
+#endif
+
+#endif
 
 #include "ijon_extension.h"
 
@@ -73,11 +95,6 @@ bool fuzzer_ready = false;
 
 
 interpreter_t* vm;
-#ifdef NET_FUZZ
-socket_state_t vm_state;
-#else
-fd_state_t vm_state;
-#endif
 
 ssize_t (*fptr_read)(int fd, void *data, size_t size);
 ssize_t (*fptr_getline)(char **lineptr, size_t *n, FILE *stream);
@@ -187,7 +204,7 @@ void hprintf_payload(char* data, size_t len){
 /* TODO: check via env var */
 //#define COPY_PAYLOAD_MODE
 
-
+#ifndef SPEC_MODE
 ssize_t call_vm(void *data, size_t max_size, bool return_pkt_size, bool disable_dump_mode) {
 
 #ifdef EARLY_EXIT_NODES
@@ -205,7 +222,7 @@ ssize_t call_vm(void *data, size_t max_size, bool return_pkt_size, bool disable_
 
     if (available_data <= 0) {
 
-        if (!afl_has_next()) {
+            if (!afl_has_next()) {
 
             /* Parse new set of packets from vm buffer */
 
@@ -216,7 +233,7 @@ ssize_t call_vm(void *data, size_t max_size, bool return_pkt_size, bool disable_
 
             afl_deserialize(vm->data, *vm->data_len);
             vm->data_len = NULL;    /* This assumes vm->data can only be written to once per execution */
-        
+            
         }
 
         /* Serialize next packet into data buffer */
@@ -255,6 +272,110 @@ ssize_t call_vm(void *data, size_t max_size, bool return_pkt_size, bool disable_
     return num_copied;
 
 }
+#else
+ssize_t call_vm(void *data, size_t max_size, bool return_pkt_size, bool disable_dump_mode){
+
+#ifdef EARLY_EXIT_NODES
+    static int count = 0;
+#endif
+
+
+#ifdef UDP_MODE
+    vm->user_data->len = max_size; 
+    vm->user_data->data = data;
+    if(interpreter_run(vm)==0){
+        return -1;
+    }
+
+#ifdef EARLY_EXIT_NODES
+    count++;
+
+    if (count >= EARLY_EXIT_NODES){
+        return -1;
+    }
+#endif
+
+    if(vm->user_data->closed){
+        return -1; /* -1 -> EOF */
+    }
+
+    //hprintf("max: %d / pkt_len: %d / len: %d\n", max_size, vm->user_data->pkt_len, vm->user_data->len);
+    if(return_pkt_size && max_size < vm->user_data->len){
+//#ifdef COPY_PAYLOAD_MODE 
+        if(payload_mode && !disable_dump_mode){
+            hprintf_payload(vm->user_data->data, vm->user_data->len);
+        }
+        //hprintf("%d vs %d\n", vm->user_data->pkt_len, max_size);
+//#endif
+        return vm->user_data->len;
+    }
+    else{
+//#ifdef COPY_PAYLOAD_MODE  
+        if(payload_mode && !disable_dump_mode){
+            hprintf_payload(vm->user_data->data, vm->user_data->len);
+        }
+//#endif
+        return vm->user_data->len;
+    }
+#else
+
+    #define PACKET_BUFFER_SIZE (1<<14)
+    static char data_buffer[PACKET_BUFFER_SIZE];
+    static size_t available_data= 0;
+    static size_t next_data = 0;
+
+    if(available_data == 0){
+        vm->user_data->len = PACKET_BUFFER_SIZE;
+        vm->user_data->data = &data_buffer[0];
+            
+        //hprintf("%s: 1: %p\n", __func__, vm);
+        //hprintf("%s: 2: %p\n", __func__, vm->user_data);
+        //hprintf("%s: 3: %p\n", __func__, vm->user_data->len);
+
+        if(interpreter_run(vm)==0){
+            DEBUG("%s: out of data\n", __func__);
+            return -1;
+        }
+
+#ifdef EARLY_EXIT_NODES
+        count++;
+
+        if (count >= EARLY_EXIT_NODES){
+            //hprintf("EARLY EXIT\n");
+            return -1;
+        }
+#endif
+
+        if(vm->user_data->closed){
+            DEBUG("%s: closed\n", __func__);
+
+            return -1; /* -1 -> EOF */
+        }
+        available_data = vm->user_data->len;
+        next_data = 0;
+    }
+
+    size_t num_copied = min_size_t(available_data, max_size);
+    /*
+    if(available_data < num_copied){
+        hprintf("WARNING: num_copied: %d / num_copied: %d\n", available_data, num_copied);
+    }
+    */
+    memcpy(data, &data_buffer[next_data], num_copied);
+    available_data-=num_copied;
+    next_data+=num_copied;
+
+    DEBUG("CALL_VM %d -> %d\n", max_size, num_copied);
+//#ifdef COPY_PAYLOAD_MODE  
+    if(payload_mode && !disable_dump_mode){
+        hprintf_payload(data, num_copied);
+    }
+//#endif
+    //return 0;
+    return num_copied;
+#endif
+}
+#endif
 
 #ifndef NET_FUZZ
 ssize_t read(int fd, void *data, size_t size) {
@@ -873,8 +994,13 @@ void nyx_init_start(void){
     free(ar);
     free(ranges);
 
-#ifndef LEGACY_MODE
+#ifdef SPEC_MODE
     vm = new_interpreter();
+#else
+#ifndef LEGACY_MODE
+    vm = malloc(sizeof(interpreter_t));
+    memset(vm, 0, sizeof(interpreter_t));
+#endif
     hprintf("interpreter: %p\n", vm);
 #endif
 
