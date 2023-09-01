@@ -67,6 +67,7 @@ extern void __assert(const char *func, const char *file, int line, const char *f
 
 /* Nyx-net mode uses the vm data structure */
 #ifndef LEGACY_MODE
+#include "afl_input.h"
 typedef struct {
 	uint16_t* ops;
 	size_t* ops_len;
